@@ -79,6 +79,43 @@ func Contains(a []string, x string) bool {
   return false
 }
 
+const urlSample = "Correct URL sample: https://www.bazaraki.com/real-estate/houses-and-villas-rent/lemesos-district-limassol/?price_min=500&price_max=1000"
+
+// validateAndFetchURL fetches the given URL and validates that it is a valid
+// Bazaraki listing page. Returns the parsed document or a descriptive error.
+func validateAndFetchURL(url string, client *http.Client) (*goquery.Document, error) {
+  if client == nil {
+    client = http.DefaultClient
+  }
+
+  req, err := http.NewRequest("GET", url, nil)
+  if err != nil {
+    return nil, fmt.Errorf("Invalid URL: %w", err)
+  }
+  req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+  res, err := client.Do(req)
+  if err != nil {
+    return nil, fmt.Errorf("Failed to fetch URL: %w", err)
+  }
+  defer res.Body.Close()
+
+  if res.StatusCode != 200 {
+    return nil, fmt.Errorf("Server returned status %d for the URL", res.StatusCode)
+  }
+
+  doc, err := goquery.NewDocumentFromReader(res.Body)
+  if err != nil {
+    return nil, fmt.Errorf("Failed to parse page content: %w", err)
+  }
+
+  if len(doc.Find(".list-announcement-assortiments").Nodes) == 0 {
+    return nil, fmt.Errorf("No advertisements found on the page. Make sure the URL points to a Bazaraki listing page.")
+  }
+
+  return doc, nil
+}
+
 func telegramBot() {
   bot, err := tgbotapi.NewBotAPI(os.Getenv("TOKEN"))
   _check(err)
@@ -132,33 +169,10 @@ func telegramBot() {
 
         fmt.Println("request: " + url)
 
-        // Request the HTML page.
-        res, err := http.Get(url)
-
+        _, err := validateAndFetchURL(url, nil)
         if err != nil {
-          bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "URL is wrong"))
-          bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "Correct URL sample: https://www.bazaraki.com/real-estate/houses-and-villas-rent/lemesos-district-limassol/?price_min=500&price_max=1000"))
-          continue
-        }
-
-        defer res.Body.Close()
-        if res.StatusCode != 200 {
-          bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "URL is wrong"))
-          bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "Correct URL sample: https://www.bazaraki.com/real-estate/houses-and-villas-rent/lemesos-district-limassol/?price_min=500&price_max=1000"))
-          continue
-        }
-
-        // Load the HTML document
-        doc, err := goquery.NewDocumentFromReader(res.Body)
-        if err != nil {
-          bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "URL is wrong"))
-          bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "Correct URL sample: https://www.bazaraki.com/real-estate/houses-and-villas-rent/lemesos-district-limassol/?price_min=500&price_max=1000"))
-          continue
-        }
-
-        if len(doc.Find(".list-announcement-assortiments").Nodes) == 0 {
-          bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "URL is wrong"))
-          bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "Correct URL sample: https://www.bazaraki.com/real-estate/houses-and-villas-rent/lemesos-district-limassol/?price_min=500&price_max=1000"))
+          bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, err.Error()))
+          bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, urlSample))
           continue
         }
 
