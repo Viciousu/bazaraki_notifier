@@ -7,6 +7,7 @@ import (
   "os"
   "reflect"
   "strconv"
+  "strings"
   "io/ioutil"
   "github.com/PuerkitoBio/goquery"
   "github.com/Syfaro/telegram-bot-api"
@@ -16,6 +17,81 @@ import (
 )
 
 var mutex sync.Mutex
+
+// Config holds all application configuration parsed from environment variables.
+type Config struct {
+  Token            string
+  DataFolder       string
+  NotifyToChat     int64
+  CheckingInterval int
+  BatchSize        int
+  UserAgent        string
+}
+
+var cfg Config
+
+// loadConfig reads configuration from environment variables and sets defaults.
+func loadConfig() Config {
+  c := Config{
+    Token:            os.Getenv("TOKEN"),
+    DataFolder:       os.Getenv("DATA_FOLDER"),
+    CheckingInterval: 300,
+    BatchSize:        20,
+    UserAgent:        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+  }
+
+  if c.Token == "" {
+    panic("TOKEN environment variable is required")
+  }
+  if c.DataFolder == "" {
+    panic("DATA_FOLDER environment variable is required")
+  }
+
+  if v := os.Getenv("CHECKING_INTERVAL"); v != "" {
+    parsed, err := strconv.Atoi(v)
+    if err != nil {
+      panic("CHECKING_INTERVAL must be a number: " + err.Error())
+    }
+    c.CheckingInterval = parsed
+  }
+
+  if v := os.Getenv("NOTIFY_TO_CHAT"); v != "" {
+    parsed, err := strconv.ParseInt(v, 10, 64)
+    if err != nil {
+      panic("NOTIFY_TO_CHAT must be a number: " + err.Error())
+    }
+    c.NotifyToChat = parsed
+  }
+
+  if v := os.Getenv("BATCH_SIZE"); v != "" {
+    parsed, err := strconv.Atoi(v)
+    if err != nil {
+      panic("BATCH_SIZE must be a number: " + err.Error())
+    }
+    c.BatchSize = parsed
+  }
+
+  if v := os.Getenv("USER_AGENT"); v != "" {
+    c.UserAgent = v
+  }
+
+  return c
+}
+
+// Ad holds details extracted from an advertisement card.
+type Ad struct {
+  Link     string
+  Title    string
+  Price    string
+  Features string
+  Place    string
+}
+
+// collapseWhitespace replaces all runs of whitespace (including newlines) with a single space and trims edges.
+func collapseWhitespace(s string) string {
+  fields := strings.Fields(s)
+  return strings.Join(fields, " ")
+}
 
 func _check(err error) {
   if err != nil {
@@ -92,7 +168,7 @@ func validateAndFetchURL(url string, client *http.Client) (*goquery.Document, er
   if err != nil {
     return nil, fmt.Errorf("Invalid URL: %w", err)
   }
-  req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+  req.Header.Set("User-Agent", cfg.UserAgent)
 
   res, err := client.Do(req)
   if err != nil {
@@ -117,7 +193,7 @@ func validateAndFetchURL(url string, client *http.Client) (*goquery.Document, er
 }
 
 func telegramBot() {
-  bot, err := tgbotapi.NewBotAPI(os.Getenv("TOKEN"))
+  bot, err := tgbotapi.NewBotAPI(cfg.Token)
   _check(err)
 
   u := tgbotapi.NewUpdate(0)
@@ -129,7 +205,7 @@ func telegramBot() {
       continue
     }
 
-    data_folder := os.Getenv("DATA_FOLDER") + "/"
+    data_folder := cfg.DataFolder + "/"
 
     // Make sure that message in text
     if reflect.TypeOf(update.Message.Text).Kind() == reflect.String && update.Message.Text != "" {
@@ -146,11 +222,8 @@ func telegramBot() {
         msg2 := tgbotapi.NewMessage(update.Message.Chat.ID, "To stop receiving notifications send me /stop")
         bot.Send(msg2)
 
-        if os.Getenv("NOTIFY_TO_CHAT") != "" {
-          chat_id_int, err := strconv.ParseInt(os.Getenv("NOTIFY_TO_CHAT"), 10, 64)
-          _check(err)
-
-          msg := tgbotapi.NewMessage(chat_id_int, "New user: @" + update.Message.From.UserName)
+        if cfg.NotifyToChat != 0 {
+          msg := tgbotapi.NewMessage(cfg.NotifyToChat, "New user: @" + update.Message.From.UserName)
           bot.Send(msg)
         }
 
@@ -196,7 +269,7 @@ func telegramBot() {
 
         msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Now you are following only this url: " + url)
         bot.Send(msg)
-        check_updates(false)
+        check_updates(true)
       }
     } else {
       msg := tgbotapi.NewMessage(update.Message.Chat.ID, "Send URL for subscribe")
@@ -210,10 +283,10 @@ func check_updates(notify bool) {
   mutex.Lock()
   defer mutex.Unlock()
 
-  bot, err := tgbotapi.NewBotAPI(os.Getenv("TOKEN"))
+  bot, err := tgbotapi.NewBotAPI(cfg.Token)
   _check(err)
 
-  data_folder := os.Getenv("DATA_FOLDER") + "/"
+  data_folder := cfg.DataFolder + "/"
 
   folders, err := ioutil.ReadDir(data_folder)
   _check(err)
@@ -232,10 +305,13 @@ func check_updates(notify bool) {
         lines, err := readLines(sended_links_path)
         _check(err)
 
-        doc, err := goquery.NewDocument(url)
+        doc, err := validateAndFetchURL(url, nil)
+        if err != nil {
+          fmt.Println("Error fetching URL: " + url + " - " + err.Error())
+          continue
+        }
 
-
-        advertisements_container := doc.Find("ul.list-simple__output")
+        advertisements_container := doc.Find(".list-simple__output")
 
         // Remove adds from another regions
         // Find the header
@@ -247,6 +323,7 @@ func check_updates(notify bool) {
           advertisements = advertisements_container.Children().Slice(0, other_advertisments_header_index);
         }
 
+        var newAds []Ad
         advertisements.Find("a").Each(func(i int, s *goquery.Selection) {
           link, _ := s.Attr("href")
           isAdv, _ := regexp.MatchString(`/adv/\d{7}_.*/`, link)
@@ -256,18 +333,69 @@ func check_updates(notify bool) {
           if isAdv && relevantAd  {
             if ! Contains(lines, link) {
               lines = append(lines, link)
-
               if notify {
-                advUrl := "https://www.bazaraki.com" + link
-                chat_id_int, err := strconv.ParseInt(chat_id, 10, 64)
-                _check(err)
+                // Extract details from the parent .advert card
+                advert := s.Closest(".advert")
+                title := collapseWhitespace(advert.Find(".advert__content-title").Text())
+                price := collapseWhitespace(advert.Find(".advert__content-price").Text())
+                features := collapseWhitespace(advert.Find(".advert__content-features").Text())
+                place := collapseWhitespace(advert.Find(".advert__content-place").Text())
 
-                msg := tgbotapi.NewMessage(chat_id_int, advUrl)
-                bot.Send(msg)
+                newAds = append(newAds, Ad{
+                  Link:     "https://www.bazaraki.com" + link,
+                  Title:    title,
+                  Price:    price,
+                  Features: features,
+                  Place:    place,
+                })
               }
             }
           }
         })
+
+        // Send new ads in batches
+        if notify && len(newAds) > 0 {
+          chat_id_int, err := strconv.ParseInt(chat_id, 10, 64)
+          _check(err)
+
+          batchSize := cfg.BatchSize
+          for i := 0; i < len(newAds); i += batchSize {
+            end := i + batchSize
+            if end > len(newAds) {
+              end = len(newAds)
+            }
+            batch := newAds[i:end]
+            var text string
+            for j, ad := range batch {
+              var entry string
+              if ad.Title != "" {
+                entry += ad.Title + "\n"
+              }
+              if ad.Price != "" {
+                entry += ad.Price + "\n"
+              }
+              if ad.Features != "" {
+                entry += ad.Features + "\n"
+              }
+              if ad.Place != "" {
+                entry += ad.Place + "\n"
+              }
+              entry += ad.Link
+
+              if len(newAds) == 1 {
+                // Single ad — no numbering
+                text = entry
+              } else {
+                text += fmt.Sprintf("%d. %s", i+j+1, entry)
+              }
+              if j < len(batch)-1 {
+                text += "\n\n"
+              }
+            }
+            bot.Send(tgbotapi.NewMessage(chat_id_int, text))
+          }
+          fmt.Printf("Sent %d new ads to chat %s\n", len(newAds), chat_id)
+        }
 
         err = writeLines(lines, sended_links_path)
         _check(err)
@@ -277,19 +405,15 @@ func check_updates(notify bool) {
 }
 
 func main() {
+  cfg = loadConfig()
+
+  fmt.Printf("Starting with checking interval: %ds, data folder: %s\n", cfg.CheckingInterval, cfg.DataFolder)
+
   go telegramBot()
-
-  checking_interval := 300
-
-  if os.Getenv("CHECKING_INTERVAL") != "" {
-    parsed_int, err := strconv.Atoi(os.Getenv("CHECKING_INTERVAL"))
-    _check(err)
-    checking_interval = parsed_int
-  }
 
   for {
     check_updates(true)
-    time.Sleep(time.Second * time.Duration(checking_interval))
+    time.Sleep(time.Second * time.Duration(cfg.CheckingInterval))
   }
 }
 

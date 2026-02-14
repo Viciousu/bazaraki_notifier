@@ -1,0 +1,7 @@
+bazaraki_notifier
+data/
+*.service
+.git
+.gitignore
+README.md
+LICENSE
