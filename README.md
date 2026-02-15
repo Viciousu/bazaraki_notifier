@@ -39,72 +39,51 @@ Commands:
 - `/start` — introduction message
 - `/stop` — unsubscribe from all notifications
 
-## Run with Docker
+## Run with Docker Compose (recommended)
 
-### Build
-
-For the current platform:
+1. Copy the example env file and fill in your token:
 
 ```bash
-docker build -t bazaraki-notifier .
+cp .env.example .env
+# Edit .env and set TOKEN=your_telegram_bot_token
 ```
 
-Cross-compile for a remote amd64 server (e.g. from Apple Silicon Mac):
+2. Start the bot:
 
 ```bash
-docker build --platform linux/amd64 -t bazaraki-notifier:amd64 .
+docker compose up -d
 ```
 
-### Run
-
-`--network host` is recommended — avoids Docker NAT which can affect Cloudflare bot detection:
+3. View logs:
 
 ```bash
-docker run -d \
-  --name bazaraki-notifier \
-  --network host \
-  --restart unless-stopped \
-  -e TOKEN=your_telegram_bot_token \
-  -e DATA_FOLDER=/app/data \
-  -e CHECKING_INTERVAL=600 \
-  -v bazaraki-data:/app/data \
-  bazaraki-notifier
+docker compose logs -f
 ```
 
-With all optional settings:
+4. Update (rebuild and restart):
 
 ```bash
-docker run -d \
-  --name bazaraki-notifier \
-  --network host \
-  --restart unless-stopped \
-  -e TOKEN=your_telegram_bot_token \
-  -e DATA_FOLDER=/app/data \
-  -e CHECKING_INTERVAL=600 \
-  -e NOTIFY_TO_CHAT=your_chat_id \
-  -e BATCH_SIZE=20 \
-  -v bazaraki-data:/app/data \
-  bazaraki-notifier
+docker compose up -d --build
+```
+
+5. Stop:
+
+```bash
+docker compose down
 ```
 
 ### Deploy to a remote server
 
+Copy `docker-compose.yml`, `Dockerfile`, source files, and `.env` to the server, then run `docker compose up -d --build`.
+
+Or transfer a pre-built image:
+
 ```bash
+docker build --platform linux/amd64 -t bazaraki-notifier:amd64 .
 docker save bazaraki-notifier:amd64 | ssh user@server "docker load"
 ```
 
-### View logs
-
-```bash
-docker logs -f bazaraki-notifier
-```
-
-### Update
-
-```bash
-docker stop bazaraki-notifier && docker rm bazaraki-notifier
-# Then run again with the new image
-```
+Then on the server create a `docker-compose.yml` and `.env`, and run `docker compose up -d` (without `--build`).
 
 ### Persistent data
 
@@ -112,6 +91,22 @@ Subscription data is stored in the `bazaraki-data` Docker volume. It survives co
 
 ```bash
 docker volume rm bazaraki-data
+```
+
+## Run with Docker (without Compose)
+
+```bash
+docker build -t bazaraki-notifier .
+
+docker run -d \
+  --name bazaraki-notifier \
+  --network host \
+  --restart unless-stopped \
+  -e TOKEN=your_telegram_bot_token \
+  -e CHECKING_INTERVAL=300 \
+  -e BATCH_SIZE=20 \
+  -v bazaraki-data:/app/data \
+  bazaraki-notifier
 ```
 
 ## Run without Docker

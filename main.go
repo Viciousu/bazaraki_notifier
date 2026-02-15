@@ -1,19 +1,21 @@
 package main
 
 import (
-  "fmt"
-  "regexp"
   "bufio"
+  "encoding/json"
+  "fmt"
+  "io/ioutil"
+  "net/http"
   "os"
   "reflect"
+  "regexp"
   "strconv"
   "strings"
-  "io/ioutil"
+  "sync"
+  "time"
+
   "github.com/PuerkitoBio/goquery"
   "github.com/Syfaro/telegram-bot-api"
-  "time"
-  "net/http"
-  "sync"
 )
 
 var mutex sync.Mutex
@@ -91,6 +93,32 @@ type Ad struct {
 func collapseWhitespace(s string) string {
   fields := strings.Fields(s)
   return strings.Join(fields, " ")
+}
+
+// readSeenAds reads sended_links.json as a map of link -> price.
+// Returns an empty map if the file does not exist.
+func readSeenAds(path string) (map[string]string, error) {
+  data, err := os.ReadFile(path)
+  if err != nil {
+    if os.IsNotExist(err) {
+      return make(map[string]string), nil
+    }
+    return nil, err
+  }
+  result := make(map[string]string)
+  if err := json.Unmarshal(data, &result); err != nil {
+    return make(map[string]string), nil
+  }
+  return result, nil
+}
+
+// writeSeenAds writes the link -> price map as JSON.
+func writeSeenAds(ads map[string]string, path string) error {
+  data, err := json.Marshal(ads)
+  if err != nil {
+    return err
+  }
+  return os.WriteFile(path, data, 0644)
 }
 
 func _check(err error) {
@@ -256,7 +284,7 @@ func telegramBot() {
         os.Remove(advertisements_path)
         createFile(advertisements_path)
 
-        createFile(chat_folder + "/sended_links")
+        writeSeenAds(make(map[string]string), chat_folder + "/sended_links.json")
 
         // Write url to advertisements list
         lines, err := readLines(advertisements_path)
@@ -276,6 +304,54 @@ func telegramBot() {
       bot.Send(msg)
 
     }
+  }
+}
+
+// formatAdEntry formats a single Ad into a text block.
+func formatAdEntry(ad Ad) string {
+  var entry string
+  if ad.Title != "" {
+    entry += ad.Title + "\n"
+  }
+  if ad.Price != "" {
+    entry += ad.Price + "\n"
+  }
+  if ad.Features != "" {
+    entry += ad.Features + "\n"
+  }
+  if ad.Place != "" {
+    entry += ad.Place + "\n"
+  }
+  entry += ad.Link
+  return entry
+}
+
+// sendAdBatch sends ads in batches to a Telegram chat.
+// If header is non-empty, it is prepended to the first batch message.
+func sendAdBatch(bot *tgbotapi.BotAPI, chatID int64, ads []Ad, header string) {
+  batchSize := cfg.BatchSize
+  for i := 0; i < len(ads); i += batchSize {
+    end := i + batchSize
+    if end > len(ads) {
+      end = len(ads)
+    }
+    batch := ads[i:end]
+    var text string
+    if header != "" && i == 0 {
+      text = header + "\n\n"
+    }
+    for j, ad := range batch {
+      entry := formatAdEntry(ad)
+      if len(ads) == 1 && header == "" {
+        text += entry
+      } else {
+        text += fmt.Sprintf("%d. %s", i+j+1, entry)
+      }
+      if j < len(batch)-1 {
+        text += "\n\n"
+      }
+    }
+    bot.Send(tgbotapi.NewMessage(chatID, text))
   }
 }
 
@@ -300,9 +376,9 @@ func check_updates(notify bool) {
       _check(err)
 
       for _, url := range advertisements {
-        sended_links_path := data_folder + chat_id + "/sended_links"
+        seenAdsPath := data_folder + chat_id + "/sended_links.json"
 
-        lines, err := readLines(sended_links_path)
+        seenAds, err := readSeenAds(seenAdsPath)
         _check(err)
 
         doc, err := validateAndFetchURL(url, nil)
@@ -313,38 +389,47 @@ func check_updates(notify bool) {
 
         advertisements_container := doc.Find(".list-simple__output")
 
-        // Remove adds from another regions
-        // Find the header
-        other_advertisments_header_index := advertisements_container.Find("h2.header").First().Index();
+        // Remove ads from other regions
+        other_advertisments_header_index := advertisements_container.Find("h2.header").First().Index()
 
-        advertisements := advertisements_container.Children();
-        // Take only advertisements before header
+        advertisements := advertisements_container.Children()
         if other_advertisments_header_index != -1 {
-          advertisements = advertisements_container.Children().Slice(0, other_advertisments_header_index);
+          advertisements = advertisements_container.Children().Slice(0, other_advertisments_header_index)
         }
 
         var newAds []Ad
+        var priceChanges []Ad
         advertisements.Find("a").Each(func(i int, s *goquery.Selection) {
           link, _ := s.Attr("href")
           isAdv, _ := regexp.MatchString(`/adv/\d{7}_.*/`, link)
-          // Gallery items are not relevant in most cases
-          relevantAd := ! s.HasClass("js-advert-gallery-item") && s.HasClass("mask")
+          relevantAd := !s.HasClass("js-advert-gallery-item") && s.HasClass("mask")
 
-          if isAdv && relevantAd  {
-            if ! Contains(lines, link) {
-              lines = append(lines, link)
+          if isAdv && relevantAd {
+            advert := s.Closest(".advert")
+            title := collapseWhitespace(advert.Find(".advert__content-title").Text())
+            price := collapseWhitespace(advert.Find(".advert__content-price").Text())
+            features := collapseWhitespace(advert.Find(".advert__content-features").Text())
+            place := collapseWhitespace(advert.Find(".advert__content-place").Text())
+
+            oldPrice, seen := seenAds[link]
+            if !seen {
+              seenAds[link] = price
               if notify {
-                // Extract details from the parent .advert card
-                advert := s.Closest(".advert")
-                title := collapseWhitespace(advert.Find(".advert__content-title").Text())
-                price := collapseWhitespace(advert.Find(".advert__content-price").Text())
-                features := collapseWhitespace(advert.Find(".advert__content-features").Text())
-                place := collapseWhitespace(advert.Find(".advert__content-place").Text())
-
                 newAds = append(newAds, Ad{
                   Link:     "https://www.bazaraki.com" + link,
                   Title:    title,
                   Price:    price,
+                  Features: features,
+                  Place:    place,
+                })
+              }
+            } else if oldPrice != "" && oldPrice != price {
+              seenAds[link] = price
+              if notify {
+                priceChanges = append(priceChanges, Ad{
+                  Link:     "https://www.bazaraki.com" + link,
+                  Title:    title,
+                  Price:    oldPrice + " → " + price,
                   Features: features,
                   Place:    place,
                 })
@@ -357,47 +442,19 @@ func check_updates(notify bool) {
         if notify && len(newAds) > 0 {
           chat_id_int, err := strconv.ParseInt(chat_id, 10, 64)
           _check(err)
-
-          batchSize := cfg.BatchSize
-          for i := 0; i < len(newAds); i += batchSize {
-            end := i + batchSize
-            if end > len(newAds) {
-              end = len(newAds)
-            }
-            batch := newAds[i:end]
-            var text string
-            for j, ad := range batch {
-              var entry string
-              if ad.Title != "" {
-                entry += ad.Title + "\n"
-              }
-              if ad.Price != "" {
-                entry += ad.Price + "\n"
-              }
-              if ad.Features != "" {
-                entry += ad.Features + "\n"
-              }
-              if ad.Place != "" {
-                entry += ad.Place + "\n"
-              }
-              entry += ad.Link
-
-              if len(newAds) == 1 {
-                // Single ad — no numbering
-                text = entry
-              } else {
-                text += fmt.Sprintf("%d. %s", i+j+1, entry)
-              }
-              if j < len(batch)-1 {
-                text += "\n\n"
-              }
-            }
-            bot.Send(tgbotapi.NewMessage(chat_id_int, text))
-          }
+          sendAdBatch(bot, chat_id_int, newAds, "")
           fmt.Printf("Sent %d new ads to chat %s\n", len(newAds), chat_id)
         }
 
-        err = writeLines(lines, sended_links_path)
+        // Send price change notifications
+        if notify && len(priceChanges) > 0 {
+          chat_id_int, err := strconv.ParseInt(chat_id, 10, 64)
+          _check(err)
+          sendAdBatch(bot, chat_id_int, priceChanges, "Price updates:")
+          fmt.Printf("Sent %d price changes to chat %s\n", len(priceChanges), chat_id)
+        }
+
+        err = writeSeenAds(seenAds, seenAdsPath)
         _check(err)
       }
     }

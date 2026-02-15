@@ -3,5 +3,6 @@ data/
 *.service
 .git
 .gitignore
+.env
 README.md
 LICENSE

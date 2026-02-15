@@ -1,0 +1,17 @@
+services:
+  bot:
+    build: .
+    image: bazaraki-notifier:amd64
+    container_name: bazaraki-notifier
+    network_mode: host
+    environment:
+      - TOKEN=${TOKEN}
+      - BATCH_SIZE=${BATCH_SIZE:-20}
+      - CHECKING_INTERVAL=${CHECKING_INTERVAL:-300}
+    volumes:
+      - bazaraki-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  bazaraki-data:
+    external: true
